@@ -1,0 +1,26 @@
+<!--
+Copyright (C) 2026 ATomSoft
+
+This file is part of Code Reference Inserter.
+
+Code Reference Inserter is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3.
+
+Code Reference Inserter is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+<svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+  <path d="M15.5 11.25 17.5 9.25a8 8 0 0 1 11.25 11.25l-3.5 3.5a8 8 0 0 1-11 .25"
+        fill="none" stroke="#AFB1B8" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M24.5 28.75 22.5 30.75A8 8 0 0 1 11.25 19.5l3.5-3.5a8 8 0 0 1 11-.25"
+        fill="none" stroke="#548AF7" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M16.25 23.75 23.75 16.25"
+        fill="none" stroke="#35B96B" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

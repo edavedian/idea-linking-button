@@ -1,0 +1,57 @@
+<!--
+Copyright (C) 2026 ATomSoft
+
+This file is part of Code Reference Inserter.
+
+Code Reference Inserter is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3.
+
+Code Reference Inserter is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+<!-- Plugin Configuration File: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <id>cz.atomsoft.ideaplugin.code-reference-inserter</id>
+    <name>Code Reference Inserter</name>
+    <vendor>ATomSoft</vendor>
+
+    <description><![CDATA[
+        Inserts the current editor file, selected line range, or Project View selection into the active Terminal tab.
+        Falls back to copying the same reference to the IDE clipboard.
+
+        Use the Insert Code Reference action from the main toolbar, navigation bar toolbar, Tools menu,
+        editor context menu, editor tab context menu, or Project View context menu.
+
+        To assign a keyboard shortcut, open Settings | Keymap | Plugins | Code Reference Inserter |
+        Insert Code Reference.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>org.jetbrains.plugins.terminal</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="CodeReferenceInserter" displayType="BALLOON" isLogByDefault="true"/>
+    </extensions>
+
+    <actions>
+        <action id="cz.atomsoft.ideaplugin.codereferenceinserter.insertCodeReference"
+                class="cz.atomsoft.ideaplugin.codereferenceinserter.InsertCodeReferenceAction"
+                text="Insert Code Reference"
+                description="Insert the current file or selection reference into the active terminal"
+                icon="/icons/linking.svg">
+            <add-to-group group-id="MainToolbarRight" anchor="last"/>
+            <add-to-group group-id="NavBarToolBar" anchor="last"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="after" relative-to-action="Copy"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+            <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
