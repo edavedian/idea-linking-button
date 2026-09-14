@@ -23,7 +23,7 @@ plugins {
 }
 
 group = "cz.atomsoft.ideaplugin"
-version = "0.9.1"
+version = providers.gradleProperty("pluginVersion").orElse("0.9.1").get()
 
 repositories {
     mavenCentral()

@@ -100,6 +100,13 @@ The generated plugin ZIP is written to:
 build/distributions/idea-code-reference-inserter-plugin-0.9.1.zip
 ```
 
+## Continuous integration and releases
+
+Every branch push and pull request runs the tests, plugin build, and plugin
+structure checks through GitHub Actions. Pushing a tag such as `1.0.0` runs the
+same checks with that tag as the plugin version and creates a GitHub Release with
+the generated ZIP attached.
+
 Plugin ID:
 
 ```text

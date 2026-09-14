@@ -22,6 +22,7 @@ import com.intellij.openapi.editor.impl.DocumentImpl
 import com.intellij.openapi.fileTypes.PlainTextFileType
 import com.intellij.testFramework.LightVirtualFile
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
+import java.nio.file.Path
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -202,23 +203,30 @@ class LinkPayloadResolverTest : BasePlatformTestCase() {
     }
 
     fun testDisplayPathIsRelativeToProjectBase() {
+        val projectBase = Path.of("work", "project").toAbsolutePath().normalize()
+        val descendant = projectBase.resolve("src").resolve("Foo.kt")
+
         assertEquals(
             "src/Foo.kt",
-            LinkPayloadResolver.resolveDisplayPath("C:/work/project", "C:/work/project/src/Foo.kt"),
+            LinkPayloadResolver.resolveDisplayPath(projectBase.toString(), descendant.toString()),
         )
     }
 
     fun testDisplayPathForProjectRootIsAbsolute() {
+        val projectBase = Path.of("work", "project").toAbsolutePath().normalize()
+
         assertEquals(
-            "C:/work/project",
-            LinkPayloadResolver.resolveDisplayPath("C:/work/project", "C:/work/project"),
+            projectBase.toString().replace('\\', '/'),
+            LinkPayloadResolver.resolveDisplayPath(projectBase.toString(), projectBase.toString()),
         )
     }
 
     fun testNonLocalDisplayPathIsKeptAsReference() {
+        val projectBase = Path.of("work", "project").toAbsolutePath().normalize()
+
         assertEquals(
             "jar://lib/library.jar!/Foo.class",
-            LinkPayloadResolver.resolveDisplayPath("C:/work/project", "jar://lib/library.jar!/Foo.class"),
+            LinkPayloadResolver.resolveDisplayPath(projectBase.toString(), "jar://lib/library.jar!/Foo.class"),
         )
     }
 

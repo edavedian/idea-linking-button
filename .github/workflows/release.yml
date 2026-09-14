@@ -1,0 +1,63 @@
+name: Release plugin
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use the form 1.0.0; got $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build and verify release
+        run: >-
+          bash ./gradlew test buildPlugin verifyPluginProjectConfiguration
+          verifyPluginStructure --no-daemon -PpluginVersion="$GITHUB_REF_NAME"
+
+      - name: Locate plugin distribution
+        id: distribution
+        shell: bash
+        run: |
+          shopt -s nullglob
+          distributions=(build/distributions/*.zip)
+          if (( ${#distributions[@]} != 1 )); then
+            echo "Expected exactly one plugin ZIP, found ${#distributions[@]}" >&2
+            printf '%s\n' "${distributions[@]}" >&2
+            exit 1
+          fi
+          echo "artifact=${distributions[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          "${{ steps.distribution.outputs.artifact }}"
+          --repo "$GITHUB_REPOSITORY"
+          --title "$GITHUB_REF_NAME"
+          --generate-notes
+          --verify-tag
