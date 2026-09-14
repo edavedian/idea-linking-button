@@ -21,6 +21,7 @@ package cz.atomsoft.ideaplugin.codereferenceinserter
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionUpdateThread
+import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
@@ -31,19 +32,24 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.IconLoader
 import java.awt.datatransfer.StringSelection
 
+/** Inserts the resolved file or selection reference into the selected terminal. */
 class InsertCodeReferenceAction : AnAction(
     "Insert Code Reference",
     "Insert the current file or selection reference into the active terminal",
     IconLoader.getIcon("/icons/linking.svg", InsertCodeReferenceAction::class.java),
 ), DumbAware {
 
+    /** Resolves the action context, then inserts into the terminal or copies to the clipboard. */
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
+        val explicitFileSelection = e.place == ActionPlaces.PROJECT_VIEW_POPUP ||
+            e.place == ActionPlaces.EDITOR_TAB_POPUP
         val payload = LinkPayloadResolver.resolve(
             project = project,
             editor = e.getData(CommonDataKeys.EDITOR),
             virtualFiles = e.getData(CommonDataKeys.VIRTUAL_FILE_ARRAY)?.toList().orEmpty(),
             fallbackFile = e.getData(CommonDataKeys.VIRTUAL_FILE),
+            explicitFileSelection = explicitFileSelection,
         )
 
         if (payload == null) {
@@ -60,7 +66,7 @@ class InsertCodeReferenceAction : AnAction(
         CopyPasteManager.getInstance().setContents(StringSelection(text))
         notify(
             project,
-            "Could not insert into terminal. Link copied to clipboard. ${terminalTextInserter.lastLookupSummary}",
+            "No active terminal. Reference copied to clipboard.",
             NotificationType.INFORMATION,
         )
     }

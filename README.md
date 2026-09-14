@@ -19,20 +19,21 @@ along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
 # Code Reference Inserter
 
 Code Reference Inserter is a JetBrains IDE plugin for quickly inserting a useful
-code reference into the currently selected Terminal tab. It is intended for
+code reference into the selected standard Terminal tab. It is intended for
 workflows where an IDE action should paste the current file, folder, or selected
 code range directly into a running shell or command-line tool.
 
-The plugin supports IntelliJ IDEA and Android Studio, and should also work in
-other JetBrains IDEs that bundle the JetBrains Terminal plugin. If the terminal
-cannot be written to, the same text is copied to the IDE clipboard.
+The development build targets IntelliJ IDEA 2025.2.4 and requires the bundled
+JetBrains Terminal plugin. Other JetBrains IDEs, including Android Studio, need
+separate runtime verification. If the terminal cannot be written to, the same
+text is copied to the IDE clipboard.
 
 ## Features
 
 - Inserts the active editor file path.
 - Inserts the active editor file path with selected line range.
 - Inserts selected files or folders from the Project View.
-- Writes into the selected Terminal tool window tab when possible.
+- Writes into the selected standard Terminal tool window tab when possible.
 - Falls back to the IDE clipboard when no supported terminal target is available.
 - Registers the **Insert Code Reference** action in the main toolbar, navigation
   bar toolbar, Tools menu, editor context menu, editor tab context menu, and
@@ -47,7 +48,8 @@ cannot be written to, the same text is copied to the IDE clipboard.
    Tools menu, editor context menu, editor tab context menu, Project View
    context menu, or an assigned keyboard shortcut.
 
-The inserted value is project-relative when possible. Examples:
+The inserted value is project-relative when possible, so it does not depend on
+the terminal process's current working directory. Examples:
 
 ```text
 src/main/kotlin/example/Foo.kt
@@ -55,6 +57,10 @@ src/main/kotlin/example/Foo.kt:12
 src/main/kotlin/example/Foo.kt:12-18
 "src/main/kotlin/example folder"
 ```
+
+The plugin transfers this text into the terminal or clipboard; it does not
+execute a command. The quoted form is a display and transfer format, not a
+guarantee of shell escaping for every command-line tool.
 
 ## Keyboard Shortcut
 
@@ -71,7 +77,7 @@ The action name shown in Keymap is **Insert Code Reference**.
 1. Build or download the plugin ZIP.
 2. In the IDE, open **Settings | Plugins**.
 3. Choose **Install Plugin from Disk...**.
-4. Select `build/distributions/idea-code-reference-inserter-plugin-0.9.0.zip`.
+4. Select `build/distributions/idea-code-reference-inserter-plugin-0.9.1.zip`.
 
 ## Development
 
@@ -91,7 +97,7 @@ Common commands:
 The generated plugin ZIP is written to:
 
 ```text
-build/distributions/idea-code-reference-inserter-plugin-0.9.0.zip
+build/distributions/idea-code-reference-inserter-plugin-0.9.1.zip
 ```
 
 Plugin ID:
@@ -102,13 +108,15 @@ cz.atomsoft.ideaplugin.code-reference-inserter
 
 ## Compatibility Notes
 
-JetBrains does not currently expose one stable public API for inserting text
-into every Terminal implementation. The plugin therefore uses several
-version-specific terminal lookup paths and keeps clipboard copy as a safe
-fallback.
+JetBrains provides the reworked Terminal API starting with 2025.3, while this
+project's development target is IntelliJ IDEA 2025.2.4. The plugin therefore
+uses a narrow compatibility bridge for the supported standard Terminal tab and
+keeps clipboard copy as a safe fallback. See the
+[JetBrains Embedded Terminal API documentation](https://plugins.jetbrains.com/docs/intellij/embedded-terminal.html)
+for the platform API and its version status.
 
-If a future IDE version changes its internal Terminal API, the notification
-shown by the plugin includes diagnostic details that can be used to add support.
+If a future IDE version changes its internal Terminal API, the plugin keeps the
+reference available through the clipboard and shows a concise fallback notification.
 
 ## License
 

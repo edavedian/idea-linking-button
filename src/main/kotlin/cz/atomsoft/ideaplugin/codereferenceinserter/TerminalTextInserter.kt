@@ -18,20 +18,105 @@
 
 package cz.atomsoft.ideaplugin.codereferenceinserter
 
+import com.intellij.ide.DataManager
+import com.intellij.openapi.actionSystem.DataKey
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.terminal.JBTerminalWidget
+import com.intellij.terminal.frontend.TerminalInput
 import com.intellij.terminal.ui.TerminalWidget
 import com.intellij.ui.content.Content
+import com.jediterm.terminal.TtyConnector
 import org.jetbrains.plugins.terminal.TerminalToolWindowFactory
 import org.jetbrains.plugins.terminal.TerminalToolWindowManager
-import org.jetbrains.plugins.terminal.TerminalView
-import java.awt.Component
+import java.util.concurrent.CancellationException
 
+/** Describes which terminal selection source is safe to use for an insertion. */
+internal enum class TerminalSelectionRoute {
+    SELECTED_CONTENT,
+    SINGLETON,
+    NONE,
+}
+
+/**
+ * Chooses selected-content routing before any singleton fallback.
+ *
+ * A present but unmatched selected content deliberately returns [TerminalSelectionRoute.NONE]
+ * so text cannot leak into another terminal widget.
+ */
+internal fun terminalSelectionRoute(
+    selectedContentAvailable: Boolean,
+    selectedContentMatchCount: Int,
+    singletonMatchCount: Int,
+): TerminalSelectionRoute = when {
+    selectedContentAvailable && selectedContentMatchCount > 0 -> TerminalSelectionRoute.SELECTED_CONTENT
+    selectedContentAvailable -> TerminalSelectionRoute.NONE
+    singletonMatchCount == 1 -> TerminalSelectionRoute.SINGLETON
+    else -> TerminalSelectionRoute.NONE
+}
+
+/**
+ * Selects one terminal candidate, using focus only when a container has multiple candidates.
+ * Returns `null` when the focused state is absent or ambiguous.
+ */
+internal fun <T> selectFocusedTerminal(
+    candidates: List<T>,
+    isFocused: (T) -> Boolean,
+): T? {
+    if (candidates.size == 1) return candidates.single()
+    return candidates.filter(isFocused).singleOrNull()
+}
+
+/**
+ * Executes one write followed by best-effort activation.
+ *
+ * A successful write remains successful when activation fails. Cancellation is rethrown and
+ * write failures are reported through [onWriteFailure] without trying another write path.
+ */
+internal fun executeTerminalInsertion(
+    text: String,
+    write: (String) -> Unit,
+    activate: () -> Unit,
+    onActivationFailure: (Throwable) -> Unit,
+    onWriteFailure: (Throwable) -> Unit,
+): Boolean {
+    return try {
+        write(text)
+        try {
+            activate()
+        } catch (e: ProcessCanceledException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            onActivationFailure(e)
+        }
+        true
+    } catch (e: ProcessCanceledException) {
+        throw e
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        onWriteFailure(e)
+        false
+    }
+}
+
+/** Writes to a classic terminal connector, returning `false` when it is unavailable. */
+internal fun writeTerminalConnector(connector: TtyConnector?, text: String): Boolean {
+    connector ?: return false
+    connector.write(text)
+    return true
+}
+
+/**
+ * Inserts caller-provided text into the selected JetBrains Terminal widget without executing it.
+ * Clipboard fallback and user notification remain the responsibility of the caller.
+ */
 @Service(Service.Level.PROJECT)
 class TerminalTextInserter(private val project: Project) {
 
@@ -39,86 +124,122 @@ class TerminalTextInserter(private val project: Project) {
     var lastLookupSummary: String = "Terminal lookup has not run yet."
         private set
 
+    /**
+     * Writes [text] once to the selected terminal and then requests focus activation.
+     *
+     * `true` means the terminal input accepted the write; focus activation is best effort.
+     * The caller can use `false` to perform its clipboard fallback. Cancellation exceptions
+     * are propagated to the caller.
+     */
     fun insertIntoSelectedTerminal(text: String): Boolean {
-        return runCatching {
+        return try {
             val terminalManager = TerminalToolWindowManager.getInstance(project)
             val target = findTarget(terminalManager)
             if (target == null) {
-                lastLookupSummary = "No target terminal input. $lastLookupSummary"
+                lastLookupSummary = "No selected terminal input. $lastLookupSummary"
                 return false
             }
 
-            val written = target.write(text)
-            if (written) {
-                lastLookupSummary = "Inserted into ${target.description}. $lastLookupSummary"
-                activateTerminal(target)
-            } else {
-                lastLookupSummary = "Target found (${target.description}), but no supported write method worked. $lastLookupSummary"
-            }
-            written
-        }.getOrElse {
-            logger.warn("Failed to insert text into selected terminal", it)
-            lastLookupSummary = "Exception during terminal lookup/write: ${it.javaClass.simpleName}: ${it.message}"
+            executeTerminalInsertion(
+                text = text,
+                write = { insertedText ->
+                    // A target has exactly one write path. Retrying another path after an exception
+                    // could submit the same text twice when the first path already reached the PTY.
+                    target.write(insertedText)
+                    lastLookupSummary = "Inserted into ${target.description}. $lastLookupSummary"
+                },
+                activate = { activateTerminal(target) },
+                onActivationFailure = { e ->
+                    // Focus is best effort and must not turn a successful write into a
+                    // reported failure that could make the caller retry the insertion.
+                    logger.warn("Failed to activate terminal after text insertion", e)
+                },
+                onWriteFailure = { e ->
+                    logger.warn("Failed to insert text into selected terminal", e)
+                    lastLookupSummary =
+                        "Exception during terminal lookup/write: ${e.javaClass.simpleName}: ${e.message}"
+                },
+            )
+        } catch (e: ProcessCanceledException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            logger.warn("Failed to find selected terminal", e)
+            lastLookupSummary = "Exception during terminal lookup: ${e.javaClass.simpleName}: ${e.message}"
             false
         }
     }
 
+    /** Resolves a target from the selected terminal content or a safe singleton fallback. */
     private fun findTarget(terminalManager: TerminalToolWindowManager): TerminalTarget? {
-        val toolWindowManager = ToolWindowManager.getInstance(project)
-        val currentToolWindowCandidates = currentToolWindowCandidates(toolWindowManager)
-        findTargetInCurrentToolWindow(currentToolWindowCandidates)?.let { return it }
-
         val toolWindow = terminalToolWindow(terminalManager)
-        val selectedContent = toolWindow?.contentManager?.selectedContent
+        if (toolWindow != null) {
+            val selectedContent = toolWindow.contentManager.selectedContent
+            if (selectedContent != null) {
+                val target = findTargetForSelectedContent(terminalManager, toolWindow, selectedContent)
+                lastLookupSummary = "toolWindow=true, selectedContent=${contentName(selectedContent)}"
+                return target
+            }
+        }
+
+        // There is no selected tab to identify a terminal. A singleton is safe only when
+        // the manager itself exposes exactly one widget; never search unrelated tool windows.
         val modernWidgets = terminalManager.terminalWidgets.toList()
-        val legacyWidgets = collectLegacyWidgets(terminalManager)
+        val legacyWidgets = terminalManager.widgets.toList()
+        lastLookupSummary =
+            "toolWindow=${toolWindow != null}, selectedContent=none, " +
+                "modern=${modernWidgets.size}, legacy=${legacyWidgets.size}"
 
-        lastLookupSummary = "toolWindow=${toolWindow != null}, selectedContent=${selectedContent?.displayName ?: "none"}, modern=${modernWidgets.size}, legacy=${legacyWidgets.size}, current=${describeToolWindows(currentToolWindowCandidates)}"
-
-        if (selectedContent != null) {
-            findTargetInContent(selectedContent, toolWindow)?.let { return it }
-
-            modernWidgets.firstOrNull { widget ->
-                terminalManager.getContainer(widget)?.content == selectedContent
-            }?.let { return widgetTarget(it, toolWindow) }
+        return when (terminalSelectionRoute(false, 0, singletonMatchCount(modernWidgets, legacyWidgets))) {
+            TerminalSelectionRoute.SINGLETON -> if (modernWidgets.size == 1) {
+                widgetTarget(modernWidgets.single(), toolWindow)
+            } else {
+                legacyWidgetTarget(legacyWidgets.single(), toolWindow)
+            }
+            else -> null
         }
-
-        if (modernWidgets.size == 1) {
-            return widgetTarget(modernWidgets.single(), toolWindow)
-        }
-
-        if (legacyWidgets.size == 1) {
-            return widgetTarget(legacyWidgets.single().asNewWidget(), toolWindow)
-        }
-
-        return null
     }
 
-    private fun findTargetInCurrentToolWindow(toolWindows: List<ToolWindow>): TerminalTarget? {
-        for (toolWindow in toolWindows) {
-            val selectedContent = toolWindow.contentManager.selectedContent ?: continue
-            val target = findTargetInContent(selectedContent, toolWindow) ?: continue
-            lastLookupSummary = "toolWindow=${toolWindow.id}, selectedContent=${selectedContent.displayName.ifBlank { "unnamed" }}, current=${describeToolWindows(toolWindows)}"
-            return target
-        }
-        return null
+    private fun singletonMatchCount(
+        modernWidgets: List<TerminalWidget>,
+        legacyWidgets: List<JBTerminalWidget>,
+    ): Int = when {
+        modernWidgets.isNotEmpty() -> if (modernWidgets.size == 1) 1 else 0
+        legacyWidgets.size == 1 -> 1
+        else -> 0
     }
 
-    private fun findTargetInContent(selectedContent: Content, toolWindow: ToolWindow?): TerminalTarget? {
-        findTerminalViewBySelectedContent(selectedContent)?.let { terminalView ->
-            return senderTarget(
-                sender = terminalView,
-                description = terminalView.javaClass.name,
-                toolWindow = toolWindow,
-                focusComponent = invokeNoArg(terminalView, "getPreferredFocusableComponent") as? Component,
-            )
+    /** Resolves only widgets belonging to [selectedContent], including focused split routing. */
+    private fun findTargetForSelectedContent(
+        terminalManager: TerminalToolWindowManager,
+        toolWindow: ToolWindow,
+        selectedContent: Content,
+    ): TerminalTarget? {
+        val modernMatches = terminalManager.terminalWidgets
+            .filter { widget -> terminalManager.getContainer(widget)?.content == selectedContent }
+            .toList()
+
+        if (modernMatches.isNotEmpty()) {
+            // A split container has one Content for multiple widgets. The focused widget
+            // is the only reliable selection signal; without it the target is ambiguous.
+            return selectFocusedTerminal(modernMatches) { it.hasFocus() }
+                ?.let { widgetTarget(it, toolWindow) }
         }
 
-        findWidgetByContent(selectedContent)?.let { return widgetTarget(it, toolWindow) }
-        findLegacyWidgetByContent(selectedContent)?.let { return legacyWidgetTarget(it, toolWindow) }
-
-        findTerminalObjectInContent(selectedContent)?.let { terminalObject ->
-            targetForTerminalObject(terminalObject, toolWindow, selectedContent.component)?.let { return it }
+        // This is the supported legacy lookup for the selected terminal tab. It does not
+        // inspect component trees or private state and cannot select another tab.
+        val legacyMatch = TerminalToolWindowManager.getWidgetByContent(selectedContent)
+        val route = terminalSelectionRoute(
+            selectedContentAvailable = true,
+            selectedContentMatchCount = if (legacyMatch == null) 0 else 1,
+            singletonMatchCount = 0,
+        )
+        if (route != TerminalSelectionRoute.SELECTED_CONTENT) {
+            return null
+        }
+        legacyMatch?.let {
+            return legacyWidgetTarget(it, toolWindow)
         }
 
         return null
@@ -133,413 +254,53 @@ class TerminalTextInserter(private val project: Project) {
         )
 
     private fun legacyWidgetTarget(widget: JBTerminalWidget, toolWindow: ToolWindow?): TerminalTarget =
-        TerminalTarget(
-            description = widget.javaClass.name,
-            toolWindow = toolWindow,
-            focus = { widget.asNewWidget().requestFocus() },
-            write = { text -> writeText(widget.asNewWidget(), text) },
-        )
-
-    private fun senderTarget(
-        sender: Any,
-        description: String,
-        toolWindow: ToolWindow?,
-        focusComponent: Component?,
-    ): TerminalTarget =
-        TerminalTarget(
-            description = description,
-            toolWindow = toolWindow,
-            focus = { focusComponent?.requestFocus() },
-            write = { text -> writeTerminalSender(sender, text) },
-        )
-
-    private fun targetForTerminalObject(
-        terminalObject: Any,
-        toolWindow: ToolWindow?,
-        focusComponent: Component?,
-    ): TerminalTarget? {
-        return when (terminalObject) {
-            is TerminalWidget -> widgetTarget(terminalObject, toolWindow)
-            is JBTerminalWidget -> legacyWidgetTarget(terminalObject, toolWindow)
-            else -> if (isTerminalSender(terminalObject)) {
-                senderTarget(
-                    sender = terminalObject,
-                    description = terminalObject.javaClass.name,
-                    toolWindow = toolWindow,
-                    focusComponent = focusComponent,
-                )
-            } else {
-                null
-            }
-        }
-    }
-
-    private fun currentToolWindowCandidates(toolWindowManager: ToolWindowManager): List<ToolWindow> {
-        val ids = LinkedHashSet<String>()
-        toolWindowManager.activeToolWindowId?.let { ids.add(it) }
-        toolWindowManager.lastActiveToolWindowId?.let { ids.add(it) }
-
-        toolWindowManager.toolWindowIds
-            .filterNot { it == TerminalToolWindowFactory.TOOL_WINDOW_ID }
-            .forEach { id ->
-                val toolWindow = toolWindowManager.getToolWindow(id)
-                if (toolWindow?.isVisible == true) {
-                    ids.add(id)
-                }
-            }
-
-        toolWindowManager.toolWindowIds
-            .filter { it == TerminalToolWindowFactory.TOOL_WINDOW_ID }
-            .forEach { id ->
-                val toolWindow = toolWindowManager.getToolWindow(id)
-                if (toolWindow?.isVisible == true) {
-                    ids.add(id)
-                }
-            }
-
-        return ids.mapNotNull { toolWindowManager.getToolWindow(it) }
-    }
-
-    private fun describeToolWindows(toolWindows: List<ToolWindow>): String =
-        toolWindows.joinToString(prefix = "[", postfix = "]") { toolWindow ->
-            val contentName = toolWindow.contentManager.selectedContent?.displayName?.ifBlank { "unnamed" } ?: "none"
-            "${toolWindow.id}:$contentName"
-        }
-
-    private fun findTerminalViewBySelectedContent(selectedContent: Content): Any? {
-        return runCatching {
-            val managerClass = Class.forName("com.intellij.terminal.frontend.toolwindow.TerminalToolWindowTabsManager")
-            val getInstance = managerClass.methods.firstOrNull { method ->
-                method.name == "getInstance" && method.parameterCount == 1 && method.parameterTypes[0].isAssignableFrom(Project::class.java)
-            } ?: return null
-            val manager = getInstance.invoke(null, project) ?: return null
-            val tabs = invokeNoArg(manager, "getTabs") as? Iterable<*> ?: return null
-            tabs.firstNotNullOfOrNull { tab ->
-                val content = invokeNoArg(tab, "getContent")
-                if (content == selectedContent) invokeNoArg(tab, "getView") else null
-            }
-        }.getOrElse {
-            logger.debug("Failed to inspect TerminalToolWindowTabsManager", it)
-            null
-        }
-    }
-
-    private fun findTerminalObjectInContent(content: Content): Any? {
-        findTerminalObject(content)?.let { return it }
-        content.component?.let { component ->
-            terminalComponents(component).forEach { child ->
-                findTerminalObject(child)?.let { return it }
-            }
-        }
-        return null
-    }
-
-    private fun findTerminalSenderInContent(content: Content): Any? {
-        return findTerminalObjectInContent(content)?.takeIf { isTerminalSender(it) }
-    }
-
-    private fun terminalComponents(root: Component): Sequence<Component> = sequence {
-        yield(root)
-        if (root is java.awt.Container) {
-            root.components.forEach { child ->
-                yieldAll(terminalComponents(child))
-            }
-        }
-    }
+        widgetTarget(widget.asNewWidget(), toolWindow)
 
     private fun terminalToolWindow(terminalManager: TerminalToolWindowManager): ToolWindow? =
-        terminalManager.getToolWindow()
+        terminalManager.toolWindow
             ?: ToolWindowManager.getInstance(project).getToolWindow(TerminalToolWindowFactory.TOOL_WINDOW_ID)
 
-    private fun findWidgetByContent(content: Content): TerminalWidget? {
-        return runCatching {
-            TerminalToolWindowManager.findWidgetByContent(content)
-        }.getOrElse {
-            logger.warn("Failed to find terminal widget by selected content", it)
-            null
+    /** Writes through exactly one reworked-input or classic-connector path. */
+    private fun writeText(widget: TerminalWidget, text: String) {
+        findReworkedTerminalInput(widget)?.let { input ->
+            input.sendString(text)
+            return
+        }
+
+        // The classic terminal exposes the PTY through the public TerminalWidget API.
+        // This writes the supplied characters only; it never executes or appends a newline.
+        if (!writeTerminalConnector(widget.ttyConnector, text)) {
+            throw IllegalStateException("Terminal connector is unavailable")
         }
     }
 
-    private fun findLegacyWidgetByContent(content: Content): JBTerminalWidget? {
-        return runCatching {
-            TerminalToolWindowManager.getWidgetByContent(content)
-        }.getOrElse {
-            logger.warn("Failed to find legacy terminal widget by selected content", it)
-            null
-        }
+    /** Looks up the reworked terminal input through its focused component data context. */
+    private fun findReworkedTerminalInput(widget: TerminalWidget): TerminalInput? {
+        val focusComponent = widget.preferredFocusableComponent
+        val dataContext = DataManager.getInstance().getDataContext(focusComponent)
+        return dataContext.getData(TERMINAL_INPUT_DATA_KEY) as? TerminalInput
     }
 
-    private fun collectLegacyWidgets(terminalManager: TerminalToolWindowManager): List<JBTerminalWidget> {
-        val widgets = LinkedHashSet<JBTerminalWidget>()
-        runCatching {
-            widgets.addAll(terminalManager.widgets)
-        }.onFailure {
-            logger.warn("Failed to inspect legacy terminal widgets from manager", it)
-        }
-
-        runCatching {
-            widgets.addAll(TerminalView.getInstance(project).getWidgets())
-        }.onFailure {
-            logger.warn("Failed to inspect legacy terminal widgets from TerminalView", it)
-        }
-
-        return widgets.toList()
-    }
-
-    private fun writeText(widget: TerminalWidget, text: String): Boolean {
-        if (invokeTerminalInputSendString(widget, text)) {
-            return true
-        }
-
-        if (invokeStringMethod(widget, "sendText", text)) {
-            return true
-        }
-
-        if (writeThroughConnector(widget, text)) {
-            return true
-        }
-
-        if (invokeStringMethod(widget, "typeText", text)) {
-            return true
-        }
-
-        if (invokeStringMethod(widget, "pasteText", text)) {
-            return true
-        }
-
-        return false
-    }
-
-    private fun writeTerminalSender(sender: Any, text: String): Boolean {
-        if (sender.javaClass.methods.any { it.name == "sendText" && it.parameterCount == 1 && it.parameterTypes[0] == String::class.java }) {
-            return invokeStringMethod(sender, "sendText", text)
-        }
-        if (sender.javaClass.methods.any { it.name == "sendString" && it.parameterCount == 1 && it.parameterTypes[0] == String::class.java }) {
-            return invokeStringMethod(sender, "sendString", text)
-        }
-        if (sender.javaClass.methods.any { it.name == "sendBytes" && it.parameterCount == 1 && it.parameterTypes[0] == ByteArray::class.java }) {
-            return invokeByteArrayMethod(sender, "sendBytes", text.toByteArray(Charsets.UTF_8))
-        }
-        return false
-    }
-
-    private fun invokeTerminalInputSendString(widget: TerminalWidget, text: String): Boolean {
-        val terminalInput = findTerminalInput(widget) ?: return false
-        return writeTerminalSender(terminalInput, text)
-    }
-
-    private fun findTerminalInput(widget: TerminalWidget): Any? {
-        return findTerminalSender(widget)
-    }
-
-    private fun findTerminalObject(source: Any?): Any? {
-        val seen = mutableSetOf<Int>()
-        return findTerminalObject(source, seen, maxDepth = 7)
-    }
-
-    private fun findTerminalObject(
-        source: Any?,
-        seen: MutableSet<Int>,
-        maxDepth: Int,
-    ): Any? {
-        if (source == null || maxDepth < 0) {
-            return null
-        }
-
-        val identity = System.identityHashCode(source)
-        if (!seen.add(identity)) {
-            return null
-        }
-
-        if (isTerminalObject(source)) {
-            return source
-        }
-
-        userDataValues(source).forEach { value ->
-            if (isTerminalObject(value)) {
-                return value
-            }
-            if (shouldDescendInto(value.javaClass)) {
-                findTerminalObject(value, seen, maxDepth - 1)?.let { return it }
-            }
-        }
-
-        for (field in allFields(source.javaClass)) {
-            val value = runCatching {
-                field.isAccessible = true
-                field.get(source)
-            }.getOrNull() ?: continue
-
-            if (isTerminalObject(value)) {
-                return value
-            }
-
-            if (shouldDescendInto(value.javaClass)) {
-                findTerminalObject(value, seen, maxDepth - 1)?.let { return it }
-            }
-        }
-
-        return null
-    }
-
-    private fun findTerminalSender(source: Any?): Any? {
-        return findTerminalObject(source)?.takeIf { isTerminalSender(it) }
-    }
-
-    private fun isTerminalSender(value: Any): Boolean {
-        val className = value.javaClass.name
-        val isTerminalObject = className.contains(".terminal.", ignoreCase = true) ||
-            className.contains("Terminal", ignoreCase = false)
-        if (!isTerminalObject) {
-            return false
-        }
-
-        return value.javaClass.methods.any { method ->
-            (method.name == "sendString" || method.name == "sendText") &&
-                method.parameterCount == 1 &&
-                method.parameterTypes[0] == String::class.java
-        } || value.javaClass.methods.any { method ->
-            method.name == "sendBytes" &&
-            method.parameterCount == 1 &&
-            method.parameterTypes[0] == ByteArray::class.java
-        }
-    }
-
-    private fun isTerminalObject(value: Any): Boolean =
-        value is TerminalWidget ||
-            value is JBTerminalWidget ||
-            isTerminalSender(value)
-
-    private fun shouldDescendInto(type: Class<*>): Boolean {
-        val name = type.name
-        return TerminalWidget::class.java.isAssignableFrom(type) ||
-            JBTerminalWidget::class.java.isAssignableFrom(type) ||
-            name.startsWith("com.intellij.terminal.") ||
-            name.startsWith("org.jetbrains.plugins.terminal.") ||
-            name.startsWith("com.jediterm.") ||
-            name.startsWith("com.intellij.ui.content.") ||
-            name.startsWith("com.intellij.openapi.editor.") ||
-            name.startsWith("com.intellij.openapi.fileEditor.") ||
-            name.startsWith("com.intellij.openapi.util.") ||
-            name.startsWith("com.intellij.util.keyFMap.")
-    }
-
-    private fun allFields(type: Class<*>): Sequence<java.lang.reflect.Field> = sequence {
-        var current: Class<*>? = type
-        while (current != null && current != Any::class.java) {
-            yieldAll(current.declaredFields.asSequence())
-            current = current.superclass
-        }
-    }
-
-    private fun allMethods(type: Class<*>): Sequence<java.lang.reflect.Method> = sequence {
-        var current: Class<*>? = type
-        while (current != null && current != Any::class.java) {
-            yieldAll(current.declaredMethods.asSequence())
-            current = current.superclass
-        }
-    }
-
-    private fun userDataValues(source: Any): Sequence<Any> = sequence {
-        if (source !is UserDataHolderBase) {
-            return@sequence
-        }
-
-        val userMap = runCatching {
-            val method = allMethods(source.javaClass).firstOrNull { it.name == "getUserMap" && it.parameterCount == 0 }
-                ?: return@sequence
-            method.isAccessible = true
-            method.invoke(source)
-        }.getOrNull() ?: return@sequence
-
-        val keys = runCatching {
-            invokeNoArg(userMap, "getKeys") as? Array<*>
-        }.getOrNull() ?: return@sequence
-
-        val getMethod = userMap.javaClass.methods.firstOrNull { method ->
-            method.name == "get" && method.parameterCount == 1
-        } ?: return@sequence
-
-        keys.filterNotNull().forEach { key ->
-            val value = runCatching {
-                getMethod.isAccessible = true
-                getMethod.invoke(userMap, key)
-            }.getOrNull()
-            if (value != null) {
-                yield(value)
-            }
-        }
-    }
-
+    /** Activates the terminal and focuses its widget when a tool window is available. */
     private fun activateTerminal(target: TerminalTarget) {
-        runCatching {
-            target.toolWindow?.activate({ target.focus() }, true)
-                ?: target.focus()
-        }.onFailure {
-            logger.warn("Failed to request focus for terminal", it)
-        }
+        target.toolWindow?.activate({ target.focus() }, true) ?: target.focus()
     }
 
-    private fun writeThroughConnector(widget: TerminalWidget, text: String): Boolean {
-        val connector = runCatching { widget.ttyConnector }.getOrNull() ?: return false
-        return runCatching {
-            connector.write(text)
-            true
-        }.getOrElse {
-            logger.warn("Failed to write through terminal connector", it)
-            false
-        }
-    }
+    private fun contentName(content: Content): String =
+        content.displayName.ifBlank { "unnamed" }
 
-    private fun invokeStringMethod(target: Any, methodName: String, text: String): Boolean {
-        val method = target.javaClass.methods.firstOrNull { method ->
-            method.name == methodName &&
-                method.parameterCount == 1 &&
-                method.parameterTypes[0] == String::class.java
-        } ?: return false
-
-        return runCatching {
-            method.isAccessible = true
-            method.invoke(target, text)
-            true
-        }.getOrElse {
-            logger.warn("Failed to invoke $methodName on ${target.javaClass.name}", it)
-            false
-        }
-    }
-
-    private fun invokeByteArrayMethod(target: Any, methodName: String, bytes: ByteArray): Boolean {
-        val method = target.javaClass.methods.firstOrNull { method ->
-            method.name == methodName &&
-                method.parameterCount == 1 &&
-                method.parameterTypes[0] == ByteArray::class.java
-        } ?: return false
-
-        return runCatching {
-            method.isAccessible = true
-            method.invoke(target, bytes)
-            true
-        }.getOrElse {
-            logger.warn("Failed to invoke $methodName on ${target.javaClass.name}", it)
-            false
-        }
-    }
-
-    private fun invokeNoArg(target: Any?, methodName: String): Any? {
-        if (target == null) return null
-        val method = target.javaClass.methods.firstOrNull { method ->
-            method.name == methodName && method.parameterCount == 0
-        } ?: return null
-        return runCatching {
-            method.isAccessible = true
-            method.invoke(target)
-        }.getOrNull()
-    }
-
+    /** A resolved widget plus the single write and focus operations allowed for it. */
     private data class TerminalTarget(
         val description: String,
         val toolWindow: ToolWindow?,
         val focus: () -> Unit,
-        val write: (String) -> Boolean,
+        val write: (String) -> Unit,
     )
+
+    private companion object {
+        // TerminalInput is installed by the reworked terminal on its focused output editor.
+        // DataContext is the terminal's supported lookup boundary; no private fields or
+        // arbitrary user-data maps are traversed.
+        val TERMINAL_INPUT_DATA_KEY: DataKey<Any> = DataKey.create("TerminalInput")
+    }
 }

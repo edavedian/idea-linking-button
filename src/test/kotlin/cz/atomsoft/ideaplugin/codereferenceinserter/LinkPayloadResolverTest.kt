@@ -18,9 +18,12 @@
 
 package cz.atomsoft.ideaplugin.codereferenceinserter
 
+import com.intellij.openapi.editor.impl.DocumentImpl
+import com.intellij.openapi.fileTypes.PlainTextFileType
+import com.intellij.testFramework.LightVirtualFile
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class LinkPayloadResolverTest : BasePlatformTestCase() {
@@ -44,9 +47,8 @@ class LinkPayloadResolverTest : BasePlatformTestCase() {
             fallbackFile = myFixture.file.virtualFile,
         )
 
-        assertNotNull(payload)
-        payload!!
-        val formatted = LinkPayloadResolver.formatInsertText(payload)
+        val resolved = requireNotNull(payload)
+        val formatted = LinkPayloadResolver.formatInsertText(resolved)
         assertTrue(formatted.endsWith("Foo.kt:3-4 "))
     }
 
@@ -68,9 +70,8 @@ class LinkPayloadResolverTest : BasePlatformTestCase() {
             fallbackFile = myFixture.file.virtualFile,
         )
 
-        assertNotNull(payload)
-        payload!!
-        val formatted = LinkPayloadResolver.formatInsertText(payload)
+        val resolved = requireNotNull(payload)
+        val formatted = LinkPayloadResolver.formatInsertText(resolved)
         assertTrue(formatted.endsWith("Foo.kt "))
     }
 
@@ -80,11 +81,102 @@ class LinkPayloadResolverTest : BasePlatformTestCase() {
 
         val payload = LinkPayloadResolver.resolve(project = project, virtualFiles = listOf(first, second))
 
-        assertNotNull(payload)
-        payload!!
-        assertEquals(2, payload.entries.size)
-        assertTrue(payload.entries[0].path.endsWith("src/Foo.kt"))
-        assertTrue(payload.entries[1].path.endsWith("src/nested/Bar.kt"))
+        val resolved = requireNotNull(payload)
+        assertEquals(2, resolved.entries.size)
+        assertTrue(resolved.entries[0].path.endsWith("src/Foo.kt"))
+        assertTrue(resolved.entries[1].path.endsWith("src/nested/Bar.kt"))
+    }
+
+    fun testExplicitProjectViewFileWinsOverEditorSelection() {
+        myFixture.configureByText(
+            "Editor.kt",
+            """
+            class Editor {
+                <selection>fun oldSelection() = true</selection>
+            }
+            """.trimIndent(),
+        )
+        val projectViewFile = myFixture.addFileToProject("src/ProjectView.kt", "class ProjectView").virtualFile
+
+        val payload = LinkPayloadResolver.resolve(
+            project = project,
+            editor = myFixture.editor,
+            virtualFiles = listOf(projectViewFile),
+            explicitFileSelection = true,
+        )
+
+        val resolved = requireNotNull(payload)
+        assertEquals(1, resolved.entries.size)
+        assertTrue(resolved.entries.single().path.replace('\\', '/').endsWith("src/ProjectView.kt"))
+        assertNull(resolved.entries.single().lineRange)
+    }
+
+    fun testExplicitFallbackFileSuppressesEditorSelection() {
+        myFixture.configureByText(
+            "Editor.kt",
+            """
+            class Editor {
+                <selection>fun selected() = true</selection>
+            }
+            """.trimIndent(),
+        )
+
+        val payload = LinkPayloadResolver.resolve(
+            project = project,
+            editor = myFixture.editor,
+            fallbackFile = myFixture.file.virtualFile,
+            explicitFileSelection = true,
+        )
+
+        val resolved = requireNotNull(payload)
+        assertEquals(1, resolved.entries.size)
+        assertTrue(resolved.entries.single().path.replace('\\', '/').endsWith("Editor.kt"))
+        assertNull(resolved.entries.single().lineRange)
+    }
+
+    fun testDerivedSingleEditorVirtualFileKeepsEditorSelection() {
+        myFixture.configureByText(
+            "Editor.kt",
+            """
+            class Editor {
+                <selection>fun selected() = true</selection>
+            }
+            """.trimIndent(),
+        )
+
+        val payload = LinkPayloadResolver.resolve(
+            project = project,
+            editor = myFixture.editor,
+            virtualFiles = listOf(myFixture.file.virtualFile),
+        )
+
+        val resolved = requireNotNull(payload)
+        assertEquals(1, resolved.entries.size)
+        assertTrue(resolved.entries.single().path.replace('\\', '/').endsWith("Editor.kt"))
+        assertEquals(LineRange(2, null), resolved.entries.single().lineRange)
+    }
+
+    fun testFallbackFileDoesNotUseDifferentEditorDocumentSelection() {
+        myFixture.configureByText(
+            "Editor.kt",
+            """
+            class Editor {
+                <selection>fun oldSelection() = true</selection>
+            }
+            """.trimIndent(),
+        )
+        val fallbackFile = myFixture.addFileToProject("src/Fallback.kt", "class Fallback").virtualFile
+
+        val payload = LinkPayloadResolver.resolve(
+            project = project,
+            editor = myFixture.editor,
+            fallbackFile = fallbackFile,
+        )
+
+        val resolved = requireNotNull(payload)
+        assertEquals(1, resolved.entries.size)
+        assertTrue(resolved.entries.single().path.replace('\\', '/').endsWith("src/Fallback.kt"))
+        assertNull(resolved.entries.single().lineRange)
     }
 
     fun testPathWithSpacesIsQuoted() {
@@ -95,10 +187,53 @@ class LinkPayloadResolverTest : BasePlatformTestCase() {
         assertEquals("\"src/with space/Foo.kt:12-18\" ", LinkPayloadResolver.formatInsertText(payload))
     }
 
+    fun testPathWithQuoteIsQuotedAndEscaped() {
+        val payload = LinkPayload(
+            listOf(LinkPayloadEntry("src/with\"quote/Foo.kt", null)),
+        )
+
+        assertEquals("\"src/with\\\"quote/Foo.kt\" ", LinkPayloadResolver.formatInsertText(payload))
+    }
+
+    fun testControlCharacterPathIsRejected() {
+        val file = LightVirtualFile("bad\nname.kt", PlainTextFileType.INSTANCE, "class Bad")
+
+        assertNull(LinkPayloadResolver.resolve(project = project, virtualFiles = listOf(file)))
+    }
+
     fun testDisplayPathIsRelativeToProjectBase() {
         assertEquals(
             "src/Foo.kt",
             LinkPayloadResolver.resolveDisplayPath("C:/work/project", "C:/work/project/src/Foo.kt"),
         )
+    }
+
+    fun testDisplayPathForProjectRootIsAbsolute() {
+        assertEquals(
+            "C:/work/project",
+            LinkPayloadResolver.resolveDisplayPath("C:/work/project", "C:/work/project"),
+        )
+    }
+
+    fun testNonLocalDisplayPathIsKeptAsReference() {
+        assertEquals(
+            "jar://lib/library.jar!/Foo.class",
+            LinkPayloadResolver.resolveDisplayPath("C:/work/project", "jar://lib/library.jar!/Foo.class"),
+        )
+    }
+
+    fun testNonEmptySelectionEndingAtDocumentLengthExcludesTrailingEmptyLine() {
+        val document = DocumentImpl("first\nsecond\n")
+
+        assertEquals(LineRange(1, 2), LinkPayloadResolver.toLineRange(document, 0, document.textLength))
+    }
+
+    fun testLineRangeRejectsOutOfBoundsOffsets() {
+        val document = DocumentImpl("first\nsecond")
+
+        assertNull(LinkPayloadResolver.toLineRange(document, -1, 1))
+        assertNull(LinkPayloadResolver.toLineRange(document, 1, document.textLength + 1))
+        assertNull(LinkPayloadResolver.toLineRange(document, document.textLength + 1, document.textLength + 1))
+        assertNull(LinkPayloadResolver.toLineRange(document, 4, 3))
     }
 }

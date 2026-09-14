@@ -16,8 +16,6 @@
  * along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import org.gradle.jvm.tasks.Jar
-
 plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm") version "2.1.20"
@@ -25,7 +23,7 @@ plugins {
 }
 
 group = "cz.atomsoft.ideaplugin"
-version = "0.9.0"
+version = "0.9.1"
 
 repositories {
     mavenCentral()
@@ -51,7 +49,7 @@ intellijPlatform {
         }
 
         changeNotes = """
-            Initial version.
+            Fixed terminal targeting and reference context resolution; removed the experimental Cursor integration.
         """.trimIndent()
     }
 
@@ -66,11 +64,6 @@ tasks {
     withType<JavaCompile> {
         sourceCompatibility = "21"
         targetCompatibility = "21"
-    }
-
-    named<Jar>("jar") {
-        from(sourceSets.main.get().output)
-        from(layout.buildDirectory.dir("classes/kotlin/main"))
     }
 }
 

@@ -25,41 +25,58 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
+import java.nio.file.InvalidPathException
 import java.nio.file.Path
 
+/** Resolves IDE action context into safe, project-aware code reference text. */
 object LinkPayloadResolver {
 
     private val logger = logger<LinkPayloadResolver>()
 
+    /**
+     * Resolves the highest-priority usable context. Explicit Project View or
+     * editor-tab file selections win over an editor left on the event; a
+     * singleton file derived from that editor keeps its selection. A fallback
+     * file receives a selection only when it belongs to the editor document.
+     */
     fun resolve(
         project: Project,
         editor: Editor? = null,
         virtualFiles: List<VirtualFile> = emptyList(),
         fallbackFile: VirtualFile? = null,
+        explicitFileSelection: Boolean = false,
     ): LinkPayload? {
+        val editorFile = editor?.let { documentFile(it) }
+        val derivedSingleEditorFile = virtualFiles.size == 1 &&
+            editorFile != null &&
+            sameFile(editorFile, virtualFiles.single())
+        if (virtualFiles.isNotEmpty() && (!derivedSingleEditorFile || explicitFileSelection)) {
+            return resolveFileEntries(project, virtualFiles)
+        }
+
+        if (fallbackFile != null) {
+            val entry = if (!explicitFileSelection &&
+                editor != null &&
+                editorFile != null &&
+                sameFile(editorFile, fallbackFile)
+            ) {
+                resolveEditorEntry(project, editor, fallbackFile)
+            } else {
+                resolveFileEntry(project, fallbackFile)
+            }
+            return entry?.let { LinkPayload(listOf(it)) }
+        }
+
         if (editor != null) {
-            val editorFile = fallbackFile
-                ?: FileDocumentManager.getInstance().getFile(editor.document)
-                ?: FileEditorManager.getInstance(project).selectedFiles.firstOrNull()
             val entry = editorFile?.let { resolveEditorEntry(project, editor, it) }
             if (entry != null) {
                 return LinkPayload(listOf(entry))
             }
         }
 
-        val selectedEntries = virtualFiles
-            .ifEmpty { listOfNotNull(fallbackFile) }
-            .distinctBy { it.path }
-            .mapNotNull { file -> resolveFileEntry(project, file) }
-
-        if (selectedEntries.isNotEmpty()) {
-            return LinkPayload(selectedEntries)
-        }
-
         val selectedEditor = FileEditorManager.getInstance(project).selectedTextEditor
         if (selectedEditor != null) {
-            val selectedFile = FileDocumentManager.getInstance().getFile(selectedEditor.document)
-                ?: FileEditorManager.getInstance(project).selectedFiles.firstOrNull()
+            val selectedFile = documentFile(selectedEditor)
             val entry = selectedFile?.let { resolveEditorEntry(project, selectedEditor, it) }
             if (entry != null) {
                 return LinkPayload(listOf(entry))
@@ -69,53 +86,62 @@ object LinkPayloadResolver {
         return null
     }
 
+    private fun resolveFileEntries(project: Project, files: List<VirtualFile>): LinkPayload? {
+        val entries = files
+            .distinctBy { it.url }
+            .mapNotNull { file -> resolveFileEntry(project, file) }
+        return entries.takeIf { it.isNotEmpty() }?.let(::LinkPayload)
+    }
+
+    /** Formats references as deterministic whitespace-safe tokens, without shell detection. */
     fun formatInsertText(payload: LinkPayload): String {
         return payload.entries.joinToString(separator = " ") { entry ->
             quoteIfNeeded(formatEntry(entry))
         } + " "
     }
 
+    /**
+     * Returns an absolute normalized path for the project root, project-relative
+     * paths for descendants, and preserves non-local URI references.
+     */
     fun resolveDisplayPath(projectBasePath: String?, rawPath: String): String {
         val normalizedRaw = normalizeSeparators(rawPath)
-        if (projectBasePath.isNullOrBlank()) {
+        if (projectBasePath.isNullOrBlank() || rawPath.contains("://") || projectBasePath.contains("://")) {
             return normalizedRaw
         }
 
-        return runCatching {
+        return try {
             val base = Path.of(projectBasePath).toAbsolutePath().normalize()
             val target = Path.of(rawPath).toAbsolutePath().normalize()
-            val path = if (target.startsWith(base)) {
-                base.relativize(target).toString()
-            } else {
-                target.toString()
+            val path = when {
+                target == base -> target.toString()
+                target.startsWith(base) -> base.relativize(target).toString()
+                else -> target.toString()
             }
             normalizeSeparators(path)
-        }.getOrElse {
-            logger.warn("Failed to resolve display path for $rawPath", it)
+        } catch (exception: InvalidPathException) {
+            logger.warn("Failed to resolve display path for $rawPath", exception)
+            normalizedRaw
+        } catch (exception: SecurityException) {
+            logger.warn("Failed to resolve display path for $rawPath", exception)
             normalizedRaw
         }
     }
 
+    /**
+     * Converts a valid half-open document selection to one-based inclusive
+     * lines. The exclusive end is decremented for every non-empty selection.
+     */
     fun toLineRange(document: Document, startOffset: Int, endOffset: Int): LineRange? {
-        if (startOffset < 0 || endOffset < startOffset) {
+        if (startOffset !in 0..endOffset || endOffset > document.textLength) {
             return null
         }
 
-        val startLine = runCatching { document.getLineNumber(startOffset) }.getOrElse {
-            logger.warn("Failed to resolve start line", it)
-            return null
-        }
+        val startLine = document.getLineNumber(startOffset)
 
-        val adjustedEnd = when {
-            endOffset <= startOffset -> startOffset
-            endOffset == document.textLength -> endOffset
-            else -> endOffset - 1
-        }
+        val adjustedEnd = if (endOffset > startOffset) endOffset - 1 else startOffset
 
-        val endLine = runCatching { document.getLineNumber(adjustedEnd.coerceAtLeast(startOffset)) }.getOrElse {
-            logger.warn("Failed to resolve end line", it)
-            startLine
-        }
+        val endLine = document.getLineNumber(adjustedEnd)
 
         val start = startLine + 1
         val end = (endLine + 1).takeIf { it > start }
@@ -134,12 +160,23 @@ object LinkPayloadResolver {
     }
 
     private fun resolveFilePath(project: Project, file: VirtualFile): String? {
-        val rawPath = file.canonicalPath ?: file.presentableUrl ?: file.path
-        if (rawPath.isBlank()) {
+        val rawPath = file.canonicalPath ?: file.presentableUrl
+        if (rawPath.isBlank() || containsControlCharacter(rawPath)) {
             return null
         }
-        return resolveDisplayPath(project.basePath, rawPath)
+        val displayPath = if (file.isInLocalFileSystem) {
+            resolveDisplayPath(project.basePath, rawPath)
+        } else {
+            normalizeSeparators(rawPath)
+        }
+        return displayPath.takeIf { it.isNotBlank() && !containsControlCharacter(it) }
     }
+
+    private fun documentFile(editor: Editor): VirtualFile? =
+        FileDocumentManager.getInstance().getFile(editor.document)
+
+    private fun sameFile(first: VirtualFile, second: VirtualFile): Boolean =
+        first == second || first.url == second.url
 
     private fun resolveSelectionLineRange(editor: Editor): LineRange? {
         val selectionModel = editor.selectionModel
@@ -165,17 +202,22 @@ object LinkPayloadResolver {
     }
 
     private fun quoteIfNeeded(text: String): String {
-        if (text.none { it.isWhitespace() }) {
+        if (text.none { it.isWhitespace() || it == '"' }) {
             return text
         }
         return "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
     }
 
+    private fun containsControlCharacter(path: String): Boolean = path.any { Character.isISOControl(it) }
+
     private fun normalizeSeparators(path: String): String = path.replace('\\', '/')
 }
 
+/** A complete set of references produced by one action invocation. */
 data class LinkPayload(val entries: List<LinkPayloadEntry>)
 
+/** A path reference with an optional one-based inclusive line range. */
 data class LinkPayloadEntry(val path: String, val lineRange: LineRange?)
 
+/** A line range; a null end denotes a single-line reference. */
 data class LineRange(val start: Int, val end: Int?)

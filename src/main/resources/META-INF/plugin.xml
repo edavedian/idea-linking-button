@@ -23,7 +23,7 @@ along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
     <vendor>ATomSoft</vendor>
 
     <description><![CDATA[
-        Inserts the current editor file, selected line range, or Project View selection into the active Terminal tab.
+        Inserts the current editor file, selected line range, or Project View selection into the selected standard Terminal tab.
         Falls back to copying the same reference to the IDE clipboard.
 
         Use the Insert Code Reference action from the main toolbar, navigation bar toolbar, Tools menu,
@@ -44,7 +44,7 @@ along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
         <action id="cz.atomsoft.ideaplugin.codereferenceinserter.insertCodeReference"
                 class="cz.atomsoft.ideaplugin.codereferenceinserter.InsertCodeReferenceAction"
                 text="Insert Code Reference"
-                description="Insert the current file or selection reference into the active terminal"
+                description="Insert the current file or selection reference into the selected standard Terminal tab"
                 icon="/icons/linking.svg">
             <add-to-group group-id="MainToolbarRight" anchor="last"/>
             <add-to-group group-id="NavBarToolBar" anchor="last"/>
