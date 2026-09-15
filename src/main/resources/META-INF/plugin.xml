@@ -23,11 +23,12 @@ along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
     <vendor>ATomSoft</vendor>
 
     <description><![CDATA[
-        Inserts the current editor file, selected line range, or Project View selection into the selected standard Terminal tab.
-        Falls back to copying the same reference to the IDE clipboard.
+        Inserts the current editor file, selected line range, or Project View selection into the selected standard Terminal tab,
+        AI Assistant chat, or GitHub Copilot Chat. Falls back to copying the same reference to the IDE clipboard.
 
         Use the Insert Code Reference action from the main toolbar, navigation bar toolbar, Tools menu,
-        editor context menu, editor tab context menu, or Project View context menu.
+        editor context menu, editor tab context menu, Project View context menu, or the floating toolbar
+        that appears over a text selection.
 
         To assign a keyboard shortcut, open Settings | Keymap | Plugins | Code Reference Inserter |
         Insert Code Reference.
@@ -44,7 +45,7 @@ along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
         <action id="cz.atomsoft.ideaplugin.codereferenceinserter.insertCodeReference"
                 class="cz.atomsoft.ideaplugin.codereferenceinserter.InsertCodeReferenceAction"
                 text="Insert Code Reference"
-                description="Insert the current file or selection reference into the selected standard Terminal tab"
+                description="Insert the current file or selection reference into the active terminal or chat"
                 icon="/icons/linking.svg">
             <add-to-group group-id="MainToolbarRight" anchor="last"/>
             <add-to-group group-id="NavBarToolBar" anchor="last"/>
@@ -52,6 +53,7 @@ along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
             <add-to-group group-id="EditorPopupMenu" anchor="after" relative-to-action="Copy"/>
             <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
             <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+            <add-to-group group-id="Floating.CodeToolbar" anchor="last"/>
         </action>
     </actions>
 </idea-plugin>

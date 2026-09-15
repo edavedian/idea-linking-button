@@ -32,14 +32,14 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.IconLoader
 import java.awt.datatransfer.StringSelection
 
-/** Inserts the resolved file or selection reference into the selected terminal. */
+/** Inserts the resolved file or selection reference into the selected terminal or chat input. */
 class InsertCodeReferenceAction : AnAction(
     "Insert Code Reference",
-    "Insert the current file or selection reference into the active terminal",
+    "Insert the current file or selection reference into the active terminal or chat",
     IconLoader.getIcon("/icons/linking.svg", InsertCodeReferenceAction::class.java),
 ), DumbAware {
 
-    /** Resolves the action context, then inserts into the terminal or copies to the clipboard. */
+    /** Resolves the action context, then inserts into the terminal/chat or copies to the clipboard. */
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
         val explicitFileSelection = e.place == ActionPlaces.PROJECT_VIEW_POPUP ||
@@ -58,15 +58,15 @@ class InsertCodeReferenceAction : AnAction(
         }
 
         val text = LinkPayloadResolver.formatInsertText(payload)
-        val terminalTextInserter = project.service<TerminalTextInserter>()
-        if (terminalTextInserter.insertIntoSelectedTerminal(text)) {
+        val dispatcher = project.service<CodeReferenceInsertionDispatcher>()
+        if (dispatcher.insert(text)) {
             return
         }
 
         CopyPasteManager.getInstance().setContents(StringSelection(text))
         notify(
             project,
-            "No active terminal. Reference copied to clipboard.",
+            "Could not insert into terminal or chat. Link copied to clipboard. ${dispatcher.lastLookupSummary}",
             NotificationType.INFORMATION,
         )
     }

@@ -49,6 +49,8 @@ intellijPlatform {
         }
 
         changeNotes = """
+            Also send to the active AI Assistant (ACP) chat or GitHub Copilot Chat input, and
+            added the clip icon to the floating toolbar shown over a text selection.<br>
             Fixed terminal targeting and reference context resolution; removed the experimental Cursor integration.
         """.trimIndent()
     }
