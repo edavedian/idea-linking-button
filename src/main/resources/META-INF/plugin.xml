@@ -23,8 +23,8 @@ along with Code Reference Inserter. If not, see <https://www.gnu.org/licenses/>.
     <vendor>ATomSoft</vendor>
 
     <description><![CDATA[
-        Inserts the current editor file, selected line range, or Project View selection into the selected standard Terminal tab,
-        AI Assistant chat, or GitHub Copilot Chat. Falls back to copying the same reference to the IDE clipboard.
+        Inserts the current editor file, selected line range, or Project View selection into the selected standard Terminal tab
+        or AI Assistant chat. Falls back to copying the same reference to the IDE clipboard.
 
         Use the Insert Code Reference action from the main toolbar, navigation bar toolbar, Tools menu,
         editor context menu, editor tab context menu, Project View context menu, or the floating toolbar

@@ -52,20 +52,18 @@ class CodeReferenceInsertionDispatcher(private val project: Project) {
             val toolWindowManager = ToolWindowManager.getInstance(project)
             val terminalIsActive = toolWindowManager.activeToolWindowId == TerminalToolWindowFactory.TOOL_WINDOW_ID
 
-            if (terminalIsActive && terminal.insertIntoSelectedTerminal(text)) {
+            if (terminalIsActive) {
+                // Terminal is documented as the exclusive target here: a failed write must not
+                // fall through to an unrelated visible chat window, so return its result as-is.
+                val written = terminal.insertIntoSelectedTerminal(text)
                 lastLookupSummary = terminal.lastLookupSummary
-                return true
+                return written
             }
 
             val candidates = ToolWindowCandidateOrder.current(
                 toolWindowManager,
                 setOf(TerminalToolWindowFactory.TOOL_WINDOW_ID),
             )
-
-            // TEMPORARY diagnostic (to be removed once Copilot detection is confirmed working):
-            // records the exact candidate order so we can see whether the Copilot Chat tool
-            // window is even being considered, and where it sits relative to the terminal.
-            logger.warn("CRI-DEBUG candidates=${ToolWindowCandidateOrder.describe(candidates)}")
 
             for (toolWindow in candidates) {
                 val content = toolWindow.contentManager.selectedContent ?: continue
@@ -78,7 +76,7 @@ class CodeReferenceInsertionDispatcher(private val project: Project) {
                 }
             }
 
-            if (!terminalIsActive && terminal.insertIntoSelectedTerminal(text)) {
+            if (terminal.insertIntoSelectedTerminal(text)) {
                 lastLookupSummary = terminal.lastLookupSummary
                 return true
             }
@@ -97,10 +95,14 @@ class CodeReferenceInsertionDispatcher(private val project: Project) {
     }
 
     private fun activate(target: TextInsertTarget) {
-        runCatching {
+        try {
             target.toolWindow?.activate({ target.focus() }, true) ?: target.focus()
-        }.onFailure {
-            logger.warn("Failed to request focus for insertion target", it)
+        } catch (e: ProcessCanceledException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            logger.warn("Failed to request focus for insertion target", e)
         }
     }
 }

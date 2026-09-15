@@ -24,18 +24,20 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.EditorModificationUtil
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.ui.content.Content
 import java.awt.Component
 import java.awt.Container
+import java.util.concurrent.CancellationException
 import javax.swing.SwingUtilities
 
 /**
- * Finds and writes into the chat input of known non-terminal chat tool windows (IntelliJ's
- * built-in AI Assistant/ACP window, GitHub Copilot's dedicated chat window). Neither plugin is
- * a compile-time dependency, so detection is done by walking the already-loaded Swing component
- * tree and matching on class-name prefixes, the same reflective spirit as [TerminalTextInserter].
+ * Finds and writes into the chat input of IntelliJ's built-in AI Assistant/ACP tool window.
+ * It is not a compile-time dependency, so detection is done by walking the already-loaded Swing
+ * component tree and matching on class-name prefixes, the same reflective spirit as
+ * [TerminalTextInserter].
  */
 @Service(Service.Level.PROJECT)
 class ChatToolWindowTextInserter(private val project: Project) {
@@ -45,78 +47,33 @@ class ChatToolWindowTextInserter(private val project: Project) {
         private set
 
     internal fun findTargetInContent(toolWindow: ToolWindow, content: Content): TextInsertTarget? {
-        // TEMPORARY diagnostics (to be removed once Copilot detection is confirmed working):
-        // dumps the content's component tree so we can see why classification/editor lookup fails.
-        logger.warn(
-            "CRI-DEBUG scan toolWindow=${toolWindow.id} content=${content.displayName} " +
-                "rootClass=${content.component?.javaClass?.name}\n" +
-                dumpComponentTree(content.component),
-        )
-
-        val kind = classify(toolWindow, content)
-        if (kind == null) {
+        if (!isAiAssistantChat(toolWindow, content)) {
             lastLookupSummary = "toolWindow=${toolWindow.id} is not a recognized chat window."
             return null
         }
 
-        logger.warn(
-            "CRI-DEBUG classified toolWindow=${toolWindow.id} as $kind, searching editors " +
-                "(allEditors=${EditorFactory.getInstance().allEditors.size}):\n" +
-                describeCandidateEditors(content.component),
-        )
-
         val editor = findWritableEditorDescendant(content.component)
         if (editor == null) {
-            lastLookupSummary = "toolWindow=${toolWindow.id} matched $kind but no writable chat input editor was found."
+            lastLookupSummary = "toolWindow=${toolWindow.id} matched AI Assistant chat but no writable input editor was found."
             return null
         }
 
-        lastLookupSummary = "toolWindow=${toolWindow.id} matched $kind chat input."
+        lastLookupSummary = "toolWindow=${toolWindow.id} matched AI Assistant chat input."
         return TextInsertTarget(
-            description = "$kind chat input (${toolWindow.id})",
+            description = "AI Assistant chat input (${toolWindow.id})",
             toolWindow = toolWindow,
             focus = { editor.contentComponent.requestFocus() },
             write = { text -> insertIntoEditor(editor, text) },
         )
     }
 
-    private fun dumpComponentTree(root: Component?, depth: Int = 0, maxDepth: Int = 6): String {
-        if (root == null || depth > maxDepth) return ""
-        val line = "${"  ".repeat(depth)}${root.javaClass.name}\n"
-        return if (root is Container) {
-            line + root.components.joinToString("") { dumpComponentTree(it, depth + 1, maxDepth) }
-        } else {
-            line
-        }
-    }
-
-    private fun describeCandidateEditors(root: Component?): String {
-        if (root == null) return "  (no root component)\n"
-        return EditorFactory.getInstance().allEditors.joinToString("") { editor ->
-            val descending = runCatching { SwingUtilities.isDescendingFrom(editor.contentComponent, root) }.getOrDefault(false)
-            "  editor=${editor.javaClass.name} disposed=${editor.isDisposed} viewer=${editor.isViewer} " +
-                "writable=${editor.document.isWritable} descendsFromRoot=$descending\n"
-        }
-    }
-
-    private fun classify(toolWindow: ToolWindow, content: Content): ChatTargetKind? {
-        val root = content.component
-        if (containsClassPrefix(root, "com.intellij.ml.llm.")) {
-            return ChatTargetKind.AI_ASSISTANT
-        }
-        if (containsClassPrefix(root, "com.github.copilot.")) {
-            return ChatTargetKind.COPILOT
+    private fun isAiAssistantChat(toolWindow: ToolWindow, content: Content): Boolean {
+        if (containsClassPrefix(content.component, "com.intellij.ml.llm.")) {
+            return true
         }
 
         val idOrTitle = "${toolWindow.id} ${runCatching { toolWindow.stripeTitle }.getOrDefault("")}".lowercase()
-        if (idOrTitle.contains("ai assistant")) {
-            return ChatTargetKind.AI_ASSISTANT
-        }
-        if (toolWindow.id == "GitHub Copilot Chat") {
-            return ChatTargetKind.COPILOT
-        }
-
-        return null
+        return idOrTitle.contains("ai assistant")
     }
 
     private fun containsClassPrefix(root: Component, prefix: String): Boolean {
@@ -148,16 +105,18 @@ class ChatToolWindowTextInserter(private val project: Project) {
     }
 
     private fun insertIntoEditor(editor: Editor, text: String): Boolean {
-        return runCatching {
+        return try {
             WriteCommandAction.runWriteCommandAction(project) {
                 EditorModificationUtil.insertStringAtCaret(editor, text, false, true)
             }
             true
-        }.getOrElse {
-            logger.warn("Failed to insert text into chat input", it)
+        } catch (e: ProcessCanceledException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            logger.warn("Failed to insert text into chat input", e)
             false
         }
     }
-
-    private enum class ChatTargetKind { AI_ASSISTANT, COPILOT }
 }
